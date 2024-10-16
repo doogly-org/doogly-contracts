@@ -1,0 +1,15 @@
+{
+    "extends": "richardpringle",
+    "env": {
+        "mocha": true,
+        "node": true
+    },
+    "parserOptions": {
+        "ecmaVersion": 8,
+        "sourceType": "module"
+    },
+    "rules": {
+        "no-unused-expressions": "off",
+        "no-undef": "off"
+    }
+}
