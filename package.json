@@ -27,6 +27,7 @@
         "@hypercerts-org/contracts": "^2.0.0-alpha.0",
         "@multiversx/sdk-core": "^12.19.0",
         "@openzeppelin/contracts": "^4.5.0",
+        "@uniswap/v3-core": "^1.0.1",
         "@uniswap/v3-periphery": "^1.4.4",
         "axios": "^0.27.2",
         "bech32": "^2.0.0",

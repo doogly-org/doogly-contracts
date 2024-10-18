@@ -6,6 +6,7 @@ import { IAxelarGateway } from '@axelar-network/axelar-gmp-sdk-solidity/contract
 import { IERC20 } from '@axelar-network/axelar-gmp-sdk-solidity/contracts/interfaces/IERC20.sol';
 import { IAxelarGasService } from '@axelar-network/axelar-gmp-sdk-solidity/contracts/interfaces/IAxelarGasService.sol';
 import { ISwapRouter } from '@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol';
+import { IUniswapV3Factory } from '@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol';
 
 
 /**
@@ -15,6 +16,8 @@ import { ISwapRouter } from '@uniswap/v3-periphery/contracts/interfaces/ISwapRou
 contract CallContractWithToken is AxelarExecutable {
     IAxelarGasService public immutable gasService;
 
+    // Define the Uniswap V3 Factory address
+    address public UNISWAP_V3_FACTORY;
     // Define the Uniswap V3 SwapRouter address
     address public  UNISWAP_V3_ROUTER;
 
@@ -23,14 +26,16 @@ contract CallContractWithToken is AxelarExecutable {
     address public AXL_USDC; // Replace with actual axlUSDC address
 
     event Executed();
+    event TokenSwapped(address indexed fromToken, address indexed toToken, uint256 amountIn, uint256 amountOut);
 
     /**
      * 
      * @param _gateway address of axl gateway on deployed chain
      * @param _gasReceiver address of axl gas service on deployed chain
      */
-    constructor(address _gateway, address _gasReceiver, address _uniswapV3Router, address _usdc, address _axlUSDC) AxelarExecutable(_gateway) {
+    constructor(address _gateway, address _gasReceiver, address _uniswapV3Factory, address _uniswapV3Router, address _usdc, address _axlUSDC) AxelarExecutable(_gateway) {
         gasService = IAxelarGasService(_gasReceiver);
+        UNISWAP_V3_FACTORY = _uniswapV3Factory;
         UNISWAP_V3_ROUTER = _uniswapV3Router;
         USDC = _usdc;
         AXL_USDC = _axlUSDC;
@@ -46,47 +51,62 @@ contract CallContractWithToken is AxelarExecutable {
         require(IERC20(inputTokenAddress).allowance(msg.sender, address(this)) >= amount, "Insufficient allowance");
         
         // Transfer tokens from user to contract
-        IERC20(inputTokenAddress).transferFrom(msg.sender, address(this), amount);
-        
-        // Approve the router to spend the input token
-        IERC20(inputTokenAddress).approve(UNISWAP_V3_ROUTER, amount);
+        require(IERC20(inputTokenAddress).transferFrom(msg.sender, address(this), amount), "Transfer failed");
 
-        // Set up the parameters for the first swap (input token to USDC)
-        ISwapRouter.ExactInputSingleParams memory params1 = ISwapRouter.ExactInputSingleParams({
-            tokenIn: inputTokenAddress,
-            tokenOut: USDC,
-            fee: 3000, // 0.3% fee tier, adjust if needed
+        // Approve the router to spend the input token
+        require(IERC20(inputTokenAddress).approve(UNISWAP_V3_ROUTER, amount), "Approval failed");
+
+        // Define possible fee tiers
+        uint24[3] memory feeTiers = [uint24(100), uint24(500), uint24(3000)]; // 0.01%, 0.05%, 0.3%
+
+        // Find the best path
+        bytes memory bestPath;
+        for (uint i = 0; i < feeTiers.length; i++) {
+            for (uint j = 0; j < feeTiers.length; j++) {
+                bytes memory currentPath = abi.encodePacked(
+                    inputTokenAddress,
+                    feeTiers[i],
+                    USDC,
+                    feeTiers[j],
+                    AXL_USDC
+                );
+                if (IUniswapV3Factory(UNISWAP_V3_FACTORY).getPool(inputTokenAddress, USDC, feeTiers[i]) != address(0) &&
+                    IUniswapV3Factory(UNISWAP_V3_FACTORY).getPool(USDC, AXL_USDC, feeTiers[j]) != address(0)) {
+                    bestPath = currentPath;
+                    break;
+                }
+            }
+            if (bestPath.length > 0) break;
+        }
+
+        require(bestPath.length > 0, "No valid pool found for the swap");
+
+        // Set up the parameters for the multi-hop swap
+        ISwapRouter.ExactInputParams memory params = ISwapRouter.ExactInputParams({
+            path: bestPath,
             recipient: address(this),
             deadline: block.timestamp + 15 minutes,
             amountIn: amount,
-            amountOutMinimum: 0, // Note: This should be calculated off-chain for production use
-            sqrtPriceLimitX96: 0
+            amountOutMinimum: 0 // As requested, keeping this at 0
         });
 
-        // Execute the first swap
-        uint256 usdcAmount = ISwapRouter(UNISWAP_V3_ROUTER).exactInputSingle(params1);
+        // Execute the multi-hop swap
+        uint256 axlUsdcAmount;
+        try ISwapRouter(UNISWAP_V3_ROUTER).exactInput(params) returns (uint256 amountOut) {
+            axlUsdcAmount = amountOut;
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Swap failed: ", reason)));
+        } catch {
+            revert("Swap failed with unknown error");
+        }
 
-        // // Approve the router to spend USDC
-        // IERC20(USDC).approve(UNISWAP_V3_ROUTER, usdcAmount);
+        require(axlUsdcAmount > 0, "Swap resulted in zero output");
 
-        // // Set up the parameters for the second swap (USDC to axlUSDC)
-        // ISwapRouter.ExactInputSingleParams memory params2 = ISwapRouter.ExactInputSingleParams({
-        //     tokenIn: USDC,
-        //     tokenOut: AXL_USDC,
-        //     fee: 500, // 0.05% fee tier, adjust if needed
-        //     recipient: address(this),
-        //     deadline: block.timestamp + 15 minutes,
-        //     amountIn: usdcAmount,
-        //     amountOutMinimum: 0, // Note: This should be calculated off-chain for production use
-        //     sqrtPriceLimitX96: 0
-        // });
-
-        // // Execute the second swap
-        // uint256 axlUsdcAmount = ISwapRouter(UNISWAP_V3_ROUTER).exactInputSingle(params2);
+        // Emit an event with swap details
+        emit TokenSwapped(inputTokenAddress, AXL_USDC, amount, axlUsdcAmount);
 
         // Return the final amount of axlUSDC
-        return usdcAmount;
-        
+        return axlUsdcAmount;
     }
 
     /**

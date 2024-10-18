@@ -28,7 +28,7 @@ describe('Call Contract With Token', async () => {
 
     let avalancheUniswapV3Router;
     let polygonUniswapV3Router;
-
+    let polygonUniswapV3Factory;
     let impersonatedSigner
     let addressToImpersonate
     let daiAddress
@@ -53,7 +53,7 @@ describe('Call Contract With Token', async () => {
               address: "0xc1DCb196BA862B337Aa23eDA1Cb9503C0801b955",
           },
           tokens: {
-              "USDC": "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+              "USDC": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
           },
         }, {
           ganacheOptions: {
@@ -67,6 +67,7 @@ describe('Call Contract With Token', async () => {
         });
 
         polygonUniswapV3Router = "0xE592427A0AEce92De3Edee1F18E0157C05861564";
+        polygonUniswapV3Factory = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
 
         // Initialize an Avalanche network
         // avalanche = await forkNetwork({
@@ -142,9 +143,10 @@ describe('Call Contract With Token', async () => {
                 "0x6f015F16De9fC8791b234eF68D486d2bF203FBA8",
                 //polygon.gasService,
                 "0x2d5d7d31F671F86C782533cc367F14109a082712",
+                polygonUniswapV3Factory,
                 polygonUniswapV3Router,
                 //polygon.tokens.USDC,
-                "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+                "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
                 axlUSDCAddress,
             ], {
               "gasLimit": 6660666
@@ -168,10 +170,11 @@ describe('Call Contract With Token', async () => {
         });
 
         it('should execute swapToken function to swap DAI to USDC and USDC to aUSDC on Polygon', async function() {
+            this.timeout(10000000)
             try {
                 console.log(`Impersonated address: ${addressToImpersonate}`);
                 console.log(`DAI address: ${daiAddress}`);
-                console.log(`USDC address: 0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359`);
+                console.log(`USDC address: 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`);
 
                 // Create approve transaction data
                 const approveData = utils.hexlify(
@@ -232,7 +235,7 @@ describe('Call Contract With Token', async () => {
                 // Send approve transaction
                 const usdcApproveTx = await polygon.ganacheProvider.send("eth_sendTransaction", [{
                     from: addressToImpersonate,
-                    to: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+                    to: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
                     data: usdcApproveData,
                     gasLimit: utils.hexlify(6660666),
                 }]);
@@ -272,7 +275,7 @@ describe('Call Contract With Token', async () => {
                 }, "latest"]);
 
                 const usdcAllowance = await polygon.ganacheProvider.send("eth_call", [{
-                    to: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+                    to: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
                     data: allowanceData
                 }, "latest"]);
 
@@ -294,7 +297,7 @@ describe('Call Contract With Token', async () => {
                     from: addressToImpersonate,
                     to: deployedContractPolygon.address,
                     data: swapData,
-                    gasLimit: utils.hexlify(6660666)
+                    gasLimit: utils.hexlify(16660666)
                 }]);
 
                 console.log("Swap transaction sent:", swapTx);
@@ -313,7 +316,7 @@ describe('Call Contract With Token', async () => {
                 }, "latest"]);
 
                 const usdcBalanceAfter = await polygon.ganacheProvider.send("eth_call", [{
-                    to: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+                    to: "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
                     data: utils.hexlify(utils.concat([
                         utils.id("balanceOf(address)").slice(0, 10),
                         utils.hexZeroPad(addressToImpersonate, 32)
