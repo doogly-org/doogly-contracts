@@ -7,13 +7,16 @@ import { IERC20 } from '@axelar-network/axelar-gmp-sdk-solidity/contracts/interf
 import { IAxelarGasService } from '@axelar-network/axelar-gmp-sdk-solidity/contracts/interfaces/IAxelarGasService.sol';
 import { ISwapRouter } from '@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol';
 import { IUniswapV3Factory } from '@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol';
+import "@openzeppelin/contracts/utils/Strings.sol";
 
 
 /**
  * @title Call Contract With Token 
  * @notice Send a token along with an Axelar GMP message between two blockchains
  */
-contract CallContractWithToken is AxelarExecutable {
+contract SwapperBridger is AxelarExecutable {
+    using Strings for bytes;
+    using Strings for uint256;
     IAxelarGasService public immutable gasService;
 
     // Define the Uniswap V3 Factory address
@@ -46,58 +49,54 @@ contract CallContractWithToken is AxelarExecutable {
      * @param inputTokenAddress address of token being sent
      * @param amount amount of tokens being sent
      */
-    function swapToken(address inputTokenAddress, uint256 amount) external returns (uint256) {
+    function swapToken(address inputTokenAddress, uint256 amount) internal returns (uint256) {
         require(IERC20(inputTokenAddress).balanceOf(msg.sender) >= amount, "Insufficient balance");
         require(IERC20(inputTokenAddress).allowance(msg.sender, address(this)) >= amount, "Insufficient allowance");
         
         // Transfer tokens from user to contract
         require(IERC20(inputTokenAddress).transferFrom(msg.sender, address(this), amount), "Transfer failed");
 
-        // Approve the router to spend the input token
-        require(IERC20(inputTokenAddress).approve(UNISWAP_V3_ROUTER, amount), "Approval failed");
+        uint256 axlUsdcAmount;
 
-        // Define possible fee tiers
-        uint24[3] memory feeTiers = [uint24(100), uint24(500), uint24(3000)]; // 0.01%, 0.05%, 0.3%
+        if (inputTokenAddress == AXL_USDC) {
+            // If input is already axlUSDC, no swap needed
+            axlUsdcAmount = amount;
+        } else {
+            // Approve the router to spend the input token
+            require(IERC20(inputTokenAddress).approve(UNISWAP_V3_ROUTER, amount), "Approval failed");
 
-        // Find the best path
-        bytes memory bestPath;
-        for (uint i = 0; i < feeTiers.length; i++) {
-            for (uint j = 0; j < feeTiers.length; j++) {
-                bytes memory currentPath = abi.encodePacked(
-                    inputTokenAddress,
-                    feeTiers[i],
-                    USDC,
-                    feeTiers[j],
+            bytes memory path;
+            if (inputTokenAddress == USDC) {
+                // If input is USDC, do single swap to axlUSDC
+                path = abi.encodePacked(USDC, findBestFeeTier(USDC, AXL_USDC), AXL_USDC);
+            } else {
+                // For other tokens, do multihop swap: token -> USDC -> axlUSDC
+                path = abi.encodePacked(
+                    inputTokenAddress, 
+                    findBestFeeTier(inputTokenAddress, USDC), 
+                    USDC, 
+                    findBestFeeTier(USDC, AXL_USDC), 
                     AXL_USDC
                 );
-                if (IUniswapV3Factory(UNISWAP_V3_FACTORY).getPool(inputTokenAddress, USDC, feeTiers[i]) != address(0) &&
-                    IUniswapV3Factory(UNISWAP_V3_FACTORY).getPool(USDC, AXL_USDC, feeTiers[j]) != address(0)) {
-                    bestPath = currentPath;
-                    break;
-                }
             }
-            if (bestPath.length > 0) break;
-        }
 
-        require(bestPath.length > 0, "No valid pool found for the swap");
+            // Set up the parameters for the swap
+            ISwapRouter.ExactInputParams memory params = ISwapRouter.ExactInputParams({
+                path: path,
+                recipient: address(this),
+                deadline: block.timestamp + 15 minutes,
+                amountIn: amount,
+                amountOutMinimum: 0 // As requested, keeping this at 0
+            });
 
-        // Set up the parameters for the multi-hop swap
-        ISwapRouter.ExactInputParams memory params = ISwapRouter.ExactInputParams({
-            path: bestPath,
-            recipient: address(this),
-            deadline: block.timestamp + 15 minutes,
-            amountIn: amount,
-            amountOutMinimum: 0 // As requested, keeping this at 0
-        });
-
-        // Execute the multi-hop swap
-        uint256 axlUsdcAmount;
-        try ISwapRouter(UNISWAP_V3_ROUTER).exactInput(params) returns (uint256 amountOut) {
-            axlUsdcAmount = amountOut;
-        } catch Error(string memory reason) {
-            revert(string(abi.encodePacked("Swap failed: ", reason)));
-        } catch {
-            revert("Swap failed with unknown error");
+            // Execute the swap
+            try ISwapRouter(UNISWAP_V3_ROUTER).exactInput(params) returns (uint256 amountOut) {
+                axlUsdcAmount = amountOut;
+            } catch Error(string memory reason) {
+                revert(string(abi.encodePacked("Swap failed: ", reason)));
+            } catch {
+                revert("Swap failed with unknown error");
+            }
         }
 
         require(axlUsdcAmount > 0, "Swap resulted in zero output");
@@ -107,6 +106,30 @@ contract CallContractWithToken is AxelarExecutable {
 
         // Return the final amount of axlUSDC
         return axlUsdcAmount;
+    }
+
+    function findBestFeeTier(address tokenA, address tokenB) internal view returns (uint24) {
+        uint24[3] memory feeTiers = [uint24(100), uint24(500), uint24(3000)]; // 0.01%, 0.05%, 0.3%
+        
+        for (uint i = 0; i < feeTiers.length; i++) {
+            if (IUniswapV3Factory(UNISWAP_V3_FACTORY).getPool(tokenA, tokenB, feeTiers[i]) != address(0)) {
+                return feeTiers[i];
+            }
+        }
+        
+        revert("No valid pool found for the swap");
+    }
+
+    function bytesToHexString(bytes memory data) internal pure returns (string memory) {
+        bytes memory alphabet = "0123456789abcdef";
+        bytes memory str = new bytes(2 + data.length * 2);
+        str[0] = "0";
+        str[1] = "x";
+        for (uint256 i = 0; i < data.length; i++) {
+            str[2 + i * 2] = alphabet[uint8(data[i] >> 4)];
+            str[3 + i * 2] = alphabet[uint8(data[i] & 0x0f)];
+        }
+        return string(str);
     }
 
     /**
@@ -127,16 +150,16 @@ contract CallContractWithToken is AxelarExecutable {
     ) external payable {
         require(msg.value > 0, 'Gas payment is required');
 
+        uint256 swappedAmount = swapToken(inputTokenAddress, amount);
 
-        // Swap inputTokenAddress to USDC using uniswap v3 router
-
-        uint256 axlUsdcAmount = this.swapToken(inputTokenAddress, amount);
+        // Ensure we received some axlUSDC from the swap
+        require(swappedAmount > 0, "Swap resulted in zero output");
 
         // Update the amount and symbol for the cross-chain transfer
-        amount = axlUsdcAmount;
+        amount = swappedAmount;
 
-        address tokenAddress = gateway.tokenAddresses('aUSDC');
-        IERC20(tokenAddress).transferFrom(msg.sender, address(this), amount);
+        address tokenAddress = gateway.tokenAddresses('axlUSDC');
+
         IERC20(tokenAddress).approve(address(gateway), amount);
         bytes memory payload = abi.encode(hcRecipientAddress);
         gasService.payNativeGasForContractCallWithToken{ value: msg.value }(
@@ -144,11 +167,11 @@ contract CallContractWithToken is AxelarExecutable {
             destinationChain,
             destinationAddress,
             payload,
-            'aUSDC',
+            'axlUSDC',
             amount,
             msg.sender
         );
-        gateway.callContractWithToken(destinationChain, destinationAddress, payload, 'aUSDC', amount);
+        gateway.callContractWithToken(destinationChain, destinationAddress, payload, 'axlUSDC', amount);
     }
 
     /**
