@@ -33,4 +33,7 @@ module.exports = {
         sources: './contracts',
         artifacts: './artifacts',
     },
+    etherscan: {
+      apiKey: "YOUR_ETHERSCAN_API_KEY",
+    },
 };

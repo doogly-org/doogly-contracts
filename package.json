@@ -27,6 +27,7 @@
         "@hypercerts-org/contracts": "^2.0.0-alpha.0",
         "@multiversx/sdk-core": "^12.19.0",
         "@openzeppelin/contracts": "^4.5.0",
+        "@uniswap/swap-router-contracts": "^1.3.1",
         "@uniswap/v3-core": "^1.0.1",
         "@uniswap/v3-periphery": "^1.4.4",
         "axios": "^0.27.2",
@@ -41,6 +42,7 @@
     "devDependencies": {
         "@nomicfoundation/hardhat-chai-matchers": "^1.0.0",
         "@nomiclabs/hardhat-ethers": "^2.2.3",
+        "@nomiclabs/hardhat-etherscan": "^3.1.8",
         "chai": "^4.4.1",
         "eslint-config-richardpringle": "^2.0.0",
         "hardhat": "^2.9.9",

@@ -238,13 +238,15 @@ describe('Call Contract With Token', async () => {
                 const abiCoder = new utils.AbiCoder();
                 const sendDonationData = utils.hexlify(
                     utils.concat([
-                        utils.id("sendDonation(string,string,address,address,uint256)").slice(0, 10),
+                        utils.id("sendDonation(string,string,address,address,uint256,address,uint256)").slice(0, 10),
                         abiCoder.encode(
-                            ["string", "string", "address", "address", "uint256"],
+                            ["string", "string", "address", "address", "uint256", "address", "uint256"],
                             [
                                 avalanche.name,
                                 deployedContractAvalanche.address,
                                 avalancheUserWallet.address,
+                                splitsAddress, // You need to define this
+                                hypercertFractionId, // You need to define this
                                 daiAddress,
                                 utils.parseUnits("1", 18)
                             ]
@@ -378,6 +380,7 @@ describe('Call Contract With Token', async () => {
     //     });
     // });
 });
+
 
 
 
