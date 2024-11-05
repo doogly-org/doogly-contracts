@@ -25,7 +25,7 @@ interface IHypercertToken {
  * @title Call Contract With Token 
  * @notice Send a token along with an Axelar GMP message between two blockchains
  */
-contract SwapperBridger is AxelarExecutable, ReentrancyGuard{
+contract SwapperBridger is AxelarExecutable, ReentrancyGuard {
     using Strings for bytes;
     using Strings for uint256;
     IAxelarGasService public immutable gasService;
@@ -71,62 +71,56 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard{
      * @param inputTokenAddress address of token being sent
      * @param amount amount of tokens being sent
      */
-    function swapToken(address inputTokenAddress, uint256 amount) internal returns (uint256) {
-        if (inputTokenAddress != address(0)) {
-            // ERC20 token case
-            require(IERC20(inputTokenAddress).balanceOf(msg.sender) >= amount, "Insufficient balance");
-            require(IERC20(inputTokenAddress).allowance(msg.sender, address(this)) >= amount, "Insufficient allowance");
-            
-            // Transfer tokens from user to contract
+    function _swapToken(address inputTokenAddress, uint256 amount) internal returns (uint256) {
+
+        if (inputTokenAddress == AXL_USDC) {
+            // Transfer axlUSDC tokens from user to contract
             require(IERC20(inputTokenAddress).transferFrom(msg.sender, address(this), amount), "Transfer failed");
-        } else {
-            // Native token case
-            require(msg.value == amount, "Sent value does not match the specified amount");
+
+            return amount;
         }
 
         uint256 axlUsdcAmount;
+        
+        // Approve the router to spend the input token (if it's not native token)
+        if (inputTokenAddress != address(0)) {
+            require(IERC20(inputTokenAddress).approve(UNISWAP_V3_ROUTER, amount), "Approval failed");
+        }
 
-        if (inputTokenAddress == AXL_USDC) {
-            // If input is already axlUSDC, no swap needed
-            axlUsdcAmount = amount;
+        bytes memory path;
+        if (inputTokenAddress == USDC) {
+            // If input is USDC, do single swap to axlUSDC
+            path = abi.encodePacked(USDC, findBestFeeTier(USDC, AXL_USDC), AXL_USDC);
         } else {
-            // Approve the router to spend the input token (if it's not native token)
-            if (inputTokenAddress != address(0)) {
-                require(IERC20(inputTokenAddress).approve(UNISWAP_V3_ROUTER, amount), "Approval failed");
-            }
+            // For other tokens, do multihop swap: token -> USDC -> axlUSDC
+            path = abi.encodePacked(
+                inputTokenAddress, 
+                findBestFeeTier(inputTokenAddress, USDC), 
+                USDC, 
+                findBestFeeTier(USDC, AXL_USDC), 
+                AXL_USDC
+            );
+        }
 
-            bytes memory path;
-            if (inputTokenAddress == USDC) {
-                // If input is USDC, do single swap to axlUSDC
-                path = abi.encodePacked(USDC, findBestFeeTier(USDC, AXL_USDC), AXL_USDC);
-            } else {
-                // For other tokens, do multihop swap: token -> USDC -> axlUSDC
-                path = abi.encodePacked(
-                    inputTokenAddress, 
-                    findBestFeeTier(inputTokenAddress, USDC), 
-                    USDC, 
-                    findBestFeeTier(USDC, AXL_USDC), 
-                    AXL_USDC
-                );
-            }
+        // Transfer axlUSDC tokens from user to contract
+        require(IERC20(inputTokenAddress).transferFrom(msg.sender, address(this), amount), "Transfer failed");
 
-            // Set up the parameters for the swap
-            IV3SwapRouter.ExactInputParams memory params = IV3SwapRouter.ExactInputParams({
-                path: path,
-                recipient: address(this),
-                // deadline: block.timestamp + 15 minutes,
-                amountIn: amount,
-                amountOutMinimum: 0 // As requested, keeping this at 0
-            });
+        // Set up the parameters for the swap
+        IV3SwapRouter.ExactInputParams memory params = IV3SwapRouter.ExactInputParams({
+            path: path,
+            recipient: address(this),
+            // deadline: block.timestamp + 15 minutes,
+            amountIn: amount,
+            amountOutMinimum: 0 // As requested, keeping this at 0
+        });
 
-            // Execute the swap
-            try IV3SwapRouter(UNISWAP_V3_ROUTER).exactInput{value: inputTokenAddress == address(0) ? amount : 0}(params) returns (uint256 amountOut) {
-                axlUsdcAmount = amountOut;
-            } catch Error(string memory reason) {
-                revert(string(abi.encodePacked("Swap failed: ", reason)));
-            } catch {
-                revert("Swap failed with unknown error");
-            }
+        // Execute the swap
+        try IV3SwapRouter(UNISWAP_V3_ROUTER).exactInput{value: inputTokenAddress == address(0) ? amount : 0}(params) returns (uint256 amountOut) {
+            axlUsdcAmount = amountOut;
+        } catch Error(string memory reason) {
+            revert(string(abi.encodePacked("Swap failed: ", reason)));
+        } catch {
+            revert("Swap failed with unknown error");
         }
 
         require(axlUsdcAmount > 0, "Swap resulted in zero output");
@@ -183,17 +177,14 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard{
         string memory destinationChain,
         string memory destinationAddress,
         address hcRecipientAddress,
-        address payable _splitsAddress,
+        address _splitsAddress,
         uint256 _hypercertFractionId,
         address inputTokenAddress,
         uint256 amount
     ) external payable {
         require(msg.value > 0, 'Gas payment is required');
 
-        uint256 swappedAmount = swapToken(inputTokenAddress, amount);
-
-        // Ensure we received some axlUSDC from the swap
-        require(swappedAmount > 0, "Swap resulted in zero output");
+        uint256 swappedAmount = _swapToken(inputTokenAddress, amount);
 
         // Update the amount and symbol for the cross-chain transfer
         amount = swappedAmount;
@@ -228,28 +219,23 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard{
         string calldata tokenSymbol,
         uint256 amount
     ) internal override {
-        (address recipient, address payable splitsAddress, uint256 hypercertFractionId) = abi.decode(payload, (address, address, uint256));
-        address tokenAddress = gateway.tokenAddresses(tokenSymbol);
-
-        // Use the received token (axlUSDC) directly without swapping
-        receiveCrossChain(tokenAddress, amount, splitsAddress, hypercertFractionId, recipient);
+        (address recipient, address splitsAddress, uint256 hypercertFractionId) = abi.decode(payload, (address, address, uint256));
+        // Swap and transfer funds into split
+        uint256 amountOut = _swapAxlUsdcToUsdc(amount, splitsAddress);
+        _receiveCrossChain(USDC, amountOut, splitsAddress, hypercertFractionId, recipient);
    
         emit Executed();
     }
 
-    function receiveCrossChain(
+    function _receiveCrossChain(
         address _token,
         uint256 _amount,
-        address payable _splitsAddress,
+        address _splitsAddress,
         uint256 _hypercertFractionId,
         address _fractionRecipient
     ) internal nonReentrant {
         require(_splitsAddress != address(0), "Invalid splits address");
         require(_fractionRecipient != address(0), "Invalid recipient address");
-        require(
-            IERC20(_token).balanceOf(address(this)) >= _amount,
-            "Insufficient balance"
-        );
 
         // Check available balance in fraction
         uint256 availableBalance = IHypercertToken(hypercertContract).unitsOf(
@@ -257,36 +243,19 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard{
         );
 
         // Check if amount is available in fraction
-        require(_amount <= availableBalance, "Insufficient balance");
-
-        // Build splits params array
-        uint256[] memory updatedFractionBalances = new uint256[](2);
-        updatedFractionBalances[0] = availableBalance - _amount;
-        updatedFractionBalances[1] = _amount;
-
-        // Transfer funds into split
-        if (_token == address(0)) {
-            require(msg.value == _amount, "Invalid amount");
-            (bool sent, bytes memory data) = _splitsAddress.call{
-                value: msg.value
-            }("");
-            require(sent, "Failed to send Ether");
-        } else {
-            require(
-                IERC20(_token).transfer(
-                    _splitsAddress,
-                    _amount
-                ),
-                "Token transfer failed"
+        if(_amount <= availableBalance) {
+            // Build splits params array
+            uint256[] memory updatedFractionBalances = new uint256[](2);
+            updatedFractionBalances[0] = availableBalance - _amount;
+            updatedFractionBalances[1] = _amount;
+            
+            // Split hypercert fraction to recipient
+            IHypercertToken(hypercertContract).splitFraction(
+                _fractionRecipient,
+                _hypercertFractionId,
+                updatedFractionBalances
             );
         }
-
-        // Split hypercert fraction to recipient
-        IHypercertToken(hypercertContract).splitFraction(
-            _fractionRecipient,
-            _hypercertFractionId,
-            updatedFractionBalances
-        );
 
         // Celebrate
         emit CrossChainTransfer(
@@ -301,14 +270,17 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard{
 
     /**
      * @notice Swap bridged axlUSDC back to USDC
-     * @param amount Amount of axlUSDC to swap
-     * @return The amount of USDC received after the swap
+     * @param _amount Amount of axlUSDC to swap
+     * @param _splitsAddress Receiver address
      */
-    function swapAxlUsdcToUsdc(uint256 amount) internal returns (uint256) {
-        require(IERC20(AXL_USDC).balanceOf(address(this)) >= amount, "Insufficient axlUSDC balance");
+    function _swapAxlUsdcToUsdc(uint256 _amount, address _splitsAddress) internal returns (uint256) {
+        require(IERC20(AXL_USDC).balanceOf(address(this)) >= _amount, "Insufficient axlUSDC balance");
 
         // Approve the router to spend axlUSDC
-        require(IERC20(AXL_USDC).approve(UNISWAP_V3_ROUTER, amount), "Approval failed");
+        require(IERC20(AXL_USDC).approve(UNISWAP_V3_ROUTER, _amount), "Approval failed");
+
+        // Transfer axlUSDC tokens to contract
+        require(IERC20(AXL_USDC).transfer(address(this), _amount), "Transfer failed");
 
         // Set up the swap path
         bytes memory path = abi.encodePacked(
@@ -320,9 +292,9 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard{
         // Set up the parameters for the swap
         IV3SwapRouter.ExactInputParams memory params = IV3SwapRouter.ExactInputParams({
             path: path,
-            recipient: address(this),
+            recipient: _splitsAddress,
             // deadline: block.timestamp + 15 minutes,
-            amountIn: amount,
+            amountIn: _amount,
             amountOutMinimum: 0 // Consider setting a minimum amount out for production
         });
 
@@ -336,10 +308,12 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard{
             revert("Swap failed with unknown error");
         }
 
-        require(usdcAmount > 0, "Swap resulted in zero output");
+        if (usdcAmount < _amount) {
+          require(_amount - usdcAmount < _amount/20, "Bad axlUSDC/USDC rate");
+        }
 
         // Emit an event with swap details
-        emit TokenSwapped(AXL_USDC, USDC, amount, usdcAmount);
+        emit TokenSwapped(AXL_USDC, USDC, _amount, usdcAmount);
 
         return usdcAmount;
     }

@@ -20,3 +20,6 @@ chain-config/*.json
 
 *.crt
 *.key
+
+.states
+.deps
