@@ -21,6 +21,10 @@ interface IHypercertToken {
     function unitsOf(uint256 tokenId) external view returns (uint256);
 }
 
+interface IAllo {
+    function fundPool(uint256 _poolId, uint256 _amount) external payable;
+}
+
 /**
  * @title Call Contract With Token 
  * @notice Send a token along with an Axelar GMP message between two blockchains
@@ -177,6 +181,7 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard {
         string memory destinationChain,
         string memory destinationAddress,
         address hcRecipientAddress,
+        uint256 poolId,
         address _splitsAddress,
         uint256 _hypercertFractionId,
         address inputTokenAddress,
@@ -192,7 +197,7 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard {
         address tokenAddress = gateway.tokenAddresses('axlUSDC');
 
         IERC20(tokenAddress).approve(address(gateway), amount);
-        bytes memory payload = abi.encode(hcRecipientAddress, _splitsAddress, _hypercertFractionId);
+        bytes memory payload = abi.encode(hcRecipientAddress, _splitsAddress, _hypercertFractionId, _poolId);
         gasService.payNativeGasForContractCallWithToken{ value: msg.value }(
             address(this),
             destinationChain,
@@ -219,10 +224,22 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard {
         string calldata tokenSymbol,
         uint256 amount
     ) internal override {
-        (address recipient, address splitsAddress, uint256 hypercertFractionId) = abi.decode(payload, (address, address, uint256));
-        // Swap and transfer funds into split
-        uint256 amountOut = _swapAxlUsdcToUsdc(amount, splitsAddress);
-        _receiveCrossChain(USDC, amountOut, splitsAddress, hypercertFractionId, recipient);
+        (address hypercertRecipient, address recipientAddress, uint256 hypercertFractionId, uint256 poolId) = abi.decode(payload, (address, address, uint256, uint256));
+        uint256 amountOut;
+        // Swap and transfer funds to allo pool if poolId is provided or else to recipient
+        if (poolId != 0) {
+          amountOut = _swapAxlUsdcToUsdc(amount, address(this));
+
+          // Approve the Allo contract to withdraw funds
+          require(IERC20(USDC).approve(recipientAddress, amount), "Approval failed");
+          
+          // Fund allo pool
+          IAllo(recipientAddress).fundPool(poolId, amountOut);
+        } else {
+          amountOut = _swapAxlUsdcToUsdc(amount, recipientAddress);
+        }
+        
+        _receiveCrossChain(USDC, amountOut, recipientAddress, hypercertFractionId, hypercertRecipient);
    
         emit Executed();
     }
@@ -249,12 +266,17 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard {
             updatedFractionBalances[0] = availableBalance - _amount;
             updatedFractionBalances[1] = _amount;
             
-            // Split hypercert fraction to recipient
-            IHypercertToken(hypercertContract).splitFraction(
+            // Encode the function call to splitFraction
+            bytes memory data = abi.encodeWithSignature(
+                "splitFraction(address,uint256,uint256[])",
                 _fractionRecipient,
                 _hypercertFractionId,
                 updatedFractionBalances
             );
+
+            // Call the function with the contract as msg.sender
+            (bool success, ) = hypercertContract.call(data);
+            require(success, "Function call failed");
         }
 
         // Celebrate
