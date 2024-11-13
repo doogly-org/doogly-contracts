@@ -25,6 +25,10 @@ interface IAllo {
     function fundPool(uint256 _poolId, uint256 _amount) external payable;
 }
 
+interface ISwapRouter is IV3SwapRouter {
+  function WETH9() external returns (address);
+}
+
 /**
  * @title Call Contract With Token 
  * @notice Send a token along with an Axelar GMP message between two blockchains
@@ -85,13 +89,45 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard {
         }
 
         uint256 axlUsdcAmount;
-        
-        // Approve the router to spend the input token (if it's not native token)
-        if (inputTokenAddress != address(0)) {
-            require(IERC20(inputTokenAddress).approve(UNISWAP_V3_ROUTER, amount), "Approval failed");
-        }
 
         bytes memory path;
+
+        if (inputTokenAddress == address(0)) {
+          path = abi.encodePacked(
+              ISwapRouter(UNISWAP_V3_ROUTER).WETH9(), 
+              findBestFeeTier(ISwapRouter(UNISWAP_V3_ROUTER).WETH9(), USDC), 
+              USDC, 
+              findBestFeeTier(USDC, AXL_USDC), 
+              AXL_USDC
+          );
+
+          // Set up the parameters for the swap
+          ISwapRouter.ExactInputParams memory params = IV3SwapRouter.ExactInputParams({
+              path: path,
+              recipient: address(this),
+              // deadline: block.timestamp + 15 minutes,
+              amountIn: amount,
+              amountOutMinimum: 0 // As requested, keeping this at 0
+          });
+
+          // Execute the swap
+          try ISwapRouter(UNISWAP_V3_ROUTER).exactInput{value: amount}(params) returns (uint256 amountOut) {
+              axlUsdcAmount = amountOut;
+          } catch Error(string memory reason) {
+              revert(string(abi.encodePacked("Swap failed: ", reason)));
+          } catch {
+              revert("Swap failed with unknown error");
+          }
+
+          require(axlUsdcAmount > 0, "Swap resulted in zero output");
+
+          // Emit an event with swap details
+          emit TokenSwapped(ISwapRouter(UNISWAP_V3_ROUTER).WETH9(), AXL_USDC, amount, axlUsdcAmount);
+
+          // Return the final amount of axlUSDC
+          return axlUsdcAmount;
+        }
+
         if (inputTokenAddress == USDC) {
             // If input is USDC, do single swap to axlUSDC
             path = abi.encodePacked(USDC, findBestFeeTier(USDC, AXL_USDC), AXL_USDC);
@@ -106,11 +142,14 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard {
             );
         }
 
-        // Transfer axlUSDC tokens from user to contract
+        // Approve the router to spend the input token (if it's not native token)
+        require(IERC20(inputTokenAddress).approve(UNISWAP_V3_ROUTER, amount), "Approval failed");
+
+        // Transfer input tokens from user to contract
         require(IERC20(inputTokenAddress).transferFrom(msg.sender, address(this), amount), "Transfer failed");
 
         // Set up the parameters for the swap
-        IV3SwapRouter.ExactInputParams memory params = IV3SwapRouter.ExactInputParams({
+        ISwapRouter.ExactInputParams memory params = IV3SwapRouter.ExactInputParams({
             path: path,
             recipient: address(this),
             // deadline: block.timestamp + 15 minutes,
@@ -119,7 +158,7 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard {
         });
 
         // Execute the swap
-        try IV3SwapRouter(UNISWAP_V3_ROUTER).exactInput{value: inputTokenAddress == address(0) ? amount : 0}(params) returns (uint256 amountOut) {
+        try ISwapRouter(UNISWAP_V3_ROUTER).exactInput(params) returns (uint256 amountOut) {
             axlUsdcAmount = amountOut;
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Swap failed: ", reason)));
@@ -191,23 +230,20 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard {
 
         uint256 swappedAmount = _swapToken(inputTokenAddress, amount);
 
-        // Update the amount and symbol for the cross-chain transfer
-        amount = swappedAmount;
-
         address tokenAddress = gateway.tokenAddresses('axlUSDC');
 
-        IERC20(tokenAddress).approve(address(gateway), amount);
-        bytes memory payload = abi.encode(hcRecipientAddress, _splitsAddress, _hypercertFractionId, _poolId);
-        gasService.payNativeGasForContractCallWithToken{ value: msg.value }(
+        IERC20(tokenAddress).approve(address(gateway), swappedAmount);
+        bytes memory payload = abi.encode(hcRecipientAddress, _splitsAddress, _hypercertFractionId, poolId);
+        gasService.payNativeGasForContractCallWithToken{ value: (inputTokenAddress != address(0)) ? msg.value : (msg.value - amount)}(
             address(this),
             destinationChain,
             destinationAddress,
             payload,
             'axlUSDC',
-            amount,
+            swappedAmount,
             msg.sender
         );
-        gateway.callContractWithToken(destinationChain, destinationAddress, payload, 'axlUSDC', amount);
+        gateway.callContractWithToken(destinationChain, destinationAddress, payload, 'axlUSDC', swappedAmount);
     }
 
     /**
@@ -312,7 +348,7 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard {
         );
 
         // Set up the parameters for the swap
-        IV3SwapRouter.ExactInputParams memory params = IV3SwapRouter.ExactInputParams({
+        ISwapRouter.ExactInputParams memory params = IV3SwapRouter.ExactInputParams({
             path: path,
             recipient: _splitsAddress,
             // deadline: block.timestamp + 15 minutes,
@@ -322,7 +358,7 @@ contract SwapperBridger is AxelarExecutable, ReentrancyGuard {
 
         // Execute the swap
         uint256 usdcAmount;
-        try IV3SwapRouter(UNISWAP_V3_ROUTER).exactInput(params) returns (uint256 amountOut) {
+        try ISwapRouter(UNISWAP_V3_ROUTER).exactInput(params) returns (uint256 amountOut) {
             usdcAmount = amountOut;
         } catch Error(string memory reason) {
             revert(string(abi.encodePacked("Swap failed: ", reason)));

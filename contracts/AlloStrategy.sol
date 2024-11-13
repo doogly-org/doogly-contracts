@@ -36,6 +36,10 @@ contract QVHypercertTieredStrategy is QVBaseStrategy {
     /// ======= Storage ======
     /// ======================
 
+    struct InitializeParamsHypercert {
+        InitializeParams params;
+    }
+
     // Hypercert ERC1155 contract
     ERC1155 public hypercert;
 
@@ -59,7 +63,14 @@ contract QVHypercertTieredStrategy is QVBaseStrategy {
     /// @param _poolId The pool id
     /// @param _data The data
     function initialize(uint256 _poolId, bytes memory _data) external override {
+        (InitializeParamsHypercert memory initializeParamsHypercert) = abi.decode(_data, (InitializeParamsHypercert));
+        __QV_NFT_TieredStrategy_init(_poolId, initializeParamsHypercert);
         emit Initialized(_poolId, _data);
+    }
+
+    /// @dev Internal initialize function that sets the poolId in the base strategy
+    function __QV_Hypercert_TieredStrategy_init(uint256 _poolId, InitializeParamsHypercert memory _initializeParamsHypercert) internal {
+        __QVBaseStrategy_init(_poolId, _initializeParamsHypercert.params);
     }
 
     /// =========================
